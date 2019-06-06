@@ -34,6 +34,7 @@ void USART1_IRQ_handler(void)
 	{
 		if (xQueueReceiveFromISR(uartPacketQueue, &packet, NULL) == pdFALSE)
 		{
+			_CR1_TXEIE_CLEAR;
 			return;
 		}
 
@@ -59,6 +60,11 @@ void USART1_IRQ_handler(void)
 				break;
 		}
 
+		if (packet.id == BROADCAST_ID)
+		{
+			rxbytes = 0;
+		}
+
 		txn = 0;
 		rxn = 0;
 		index = idToIndex(packet.id);
@@ -79,7 +85,14 @@ void USART1_IRQ_handler(void)
 	if (tcie && tc)
 	{
 		_CR1_TCIE_CLEAR;
-		_CR1_RXNEIE_SET;
+		if (rxbytes)
+		{
+			_CR1_RXNEIE_SET;
+		}
+		else
+		{
+			inProgress = 0;
+		}
 		_GPIOB_BSRR |= (1 << 16);
 	}
 
@@ -114,8 +127,9 @@ void USART1_IRQ_handler(void)
 					switch (packet.params[0])
 					{
 						case AX_PRESENT_POSITION:
-							presentPositions[index].xa[0] = rx[4];
-							presentPositions[index].xa[1] = rx[5];
+							pings[index] = rx[4];
+							presentPositions[index].xa[0] = rx[5];
+							presentPositions[index].xa[1] = rx[6];
 							break;
 					}
 					break;
@@ -123,6 +137,14 @@ void USART1_IRQ_handler(void)
 
 			_CR1_RXNEIE_CLEAR;
 			inProgress = 0;
+		}
+	}
+
+	if (!inProgress)
+	{
+		if (uxQueueMessagesWaitingFromISR(uartPacketQueue))
+		{
+			_CR1_TXEIE_SET;
 		}
 	}
 }
@@ -171,8 +193,8 @@ void init_task()
 
 	//Start user, arm, ping, position, rgb tasks.
 	//xTaskCreate(user_task, "user", 128, NULL, 10, NULL);
-	//xTaskCreate(arm_task, "arm", 128, NULL, 9, NULL);
-	xTaskCreate(ping_task, "ping", 128, NULL, 8, NULL);
+	xTaskCreate(arm_task, "arm", 128, NULL, 9, NULL);
+	//xTaskCreate(ping_task, "ping", 128, NULL, 8, NULL);
 	//xTaskCreate(position_task, "position", 128, NULL, 7, NULL);
 	//xTaskCreate(rgb_task, "rgb", 128, NULL, 6, NULL);
 
@@ -182,7 +204,72 @@ void init_task()
 	NVIC_SetPriorityGrouping(__NVIC_PRIO_BITS); //https://www.freertos.org/RTOS-Cortex-M3-M4.html
 	NVIC_SetPriority(37, 0);
 	NVIC_ClearPendingIRQ(37);
-	NVIC_EnableIRQ(37);
+	//NVIC_EnableIRQ(37);
+
+	//Prepare arms.
+	ax_packet_t packet;
+	packet.id = BROADCAST_ID;
+	packet.type = AX_WRITE;
+	//EEPROM:
+	//RETURN DELAY TIME 1
+	packet.params[0] = AX_RETURN_DELAY_TIME;
+	packet.params[1] = 50;
+	packet.params_length = 2;
+	xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
+	//CW ANGLE LIMIT 2
+	packet.params[0] = AX_CW_ANGLE_LIMIT;
+	packet.params[1] = DEGREES_TO_UNITS(60) & 0xFF;
+	packet.params[2] = (DEGREES_TO_UNITS(60) >> 8) & 0xFF;
+	packet.params_length = 3;
+	xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
+	//CCW ANGLE LIMIT 2
+	packet.params[0] = AX_CCW_ANGLE_LIMIT;
+	packet.params[1] = DEGREES_TO_UNITS(240) & 0xFF;
+	packet.params[2] = (DEGREES_TO_UNITS(240) >> 8) & 0xFF;
+	packet.params_length = 3;
+	xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
+	//MAX TORQUE 2
+	packet.params[0] = AX_MAX_TORQUE;
+	packet.params[1] = 0xFF;
+	packet.params[2] = 0x03;
+	packet.params_length = 3;
+	xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
+	//STATUS RETURN LEVEL 2
+	packet.params[0] = AX_STATUS_RETURN_LEVEL;
+	packet.params[1] = 0x02; //Return status packet for all instruction packets.
+	packet.params_length = 2;
+	xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
+	//RAM:
+	//MOVING SPEED 2
+	packet.params[0] = AX_MOVING_SPEED;
+	packet.params[1] = RPM_TO_UNITS(RPM) & 0xFF;
+	packet.params[2] = (RPM_TO_UNITS(RPM) >> 8) & 0xFF;
+	packet.params_length = 3;
+	xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
+	//TORQUE ENABLE 1
+	packet.params[0] = AX_TORQUE_ENABLE;
+	packet.params[1] = 0x01;
+	packet.params_length = 2;
+	xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
+
+	//First round of present position readings.
+	for (int arm = ARM_3_BASE; arm <= ARM_3_BASE; arm += 10)
+	{
+		for (int motor = MOTOR_A; motor <= MOTOR_F; ++motor)
+		{
+			packet.id = arm + motor;
+			packet.type = AX_READ;
+			packet.params[0] = AX_PRESENT_POSITION;
+			packet.params[1] = 2; //Amount of bytes to read.
+			packet.params_length = 2;
+			xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
+		}
+	}
+
+	if (!inProgress)
+	{
+		_CR1_TXEIE_SET;
+	}
 
 	//Init task suicide.
 	vTaskDelete(NULL);
@@ -200,34 +287,15 @@ void user_task()
 
 void arm_task()
 {
-	//These are the wrong numbers.
-	//They should be in units instead of degrees.
-	//150 / 0.29 = 517.
-	goalPositions[0].x = 150;
-	goalPositions[1].x = 195;
-	goalPositions[2].x = 60;
-	goalPositions[3].x = 60;
-	goalPositions[4].x = 150;
-	goalPositions[5].x = 150;
+	goalPositions[18].x = DEGREES_TO_UNITS(150);
+	goalPositions[19].x = DEGREES_TO_UNITS(195);
+	goalPositions[20].x = DEGREES_TO_UNITS(60);
+	goalPositions[21].x = DEGREES_TO_UNITS(60);
+	goalPositions[22].x = DEGREES_TO_UNITS(150);
+	goalPositions[23].x = DEGREES_TO_UNITS(150);
 
-	goalPositions[6].x = 150;
-	goalPositions[7].x = 195;
-	goalPositions[8].x = 60;
-	goalPositions[9].x = 60;
-	goalPositions[10].x = 150;
-	goalPositions[11].x = 150;
-
-	goalPositions[42].x = 150;
-	goalPositions[43].x = 195;
-	goalPositions[44].x = 60;
-	goalPositions[45].x = 60;
-	goalPositions[46].x = 150;
-	goalPositions[47].x = 150;
-
-	instruction_t ins1 = {0, 1, 240, 60, 0, "t1", "t2"};
-	instruction_t ins2 = {0, 2, 240, 150, 0, "t2", "f2"};
-	instruction_t ins3 = {0, 8, 240, 60, 0, "t8", "t1"};
-	instruction_t *inss[] = {&ins1, &ins2, &ins3};
+	instruction_t ins1 = {0, 3, 240, 60, 0, "t5", "t6"};
+	instruction_t *inss[] = {&ins1};
 	uint8_t inss_length = sizeof(inss) / sizeof(instruction_t *);
 
 	while (1)
@@ -272,16 +340,17 @@ void arm_task()
 				uint8_t stateChangeComplete = 1;
 				for (int j = 0; j < 6; ++j)
 				{
-					uint8_t index = (ins->arm - 1) * 6 + j;
-					if (abs(presentPositions[index].x - goalPositions[index].x) > 5)
+					volatile uint8_t index = (ins->arm - 1) * 6 + j;
+					volatile uint16_t difference = abs(presentPositions[index].x - goalPositions[index].x);
+					if (difference > 2)
 					{
-						//stateChangeComplete = 0;
+						stateChangeComplete = 0;
 					}
 				}
 
 				if (!stateChangeComplete)
 				{
-					continue;
+					//continue;
 				}
 
 				switch (ins->state)
@@ -335,19 +404,20 @@ void arm_task()
 			break;
 		}
 	}
+
+	vTaskDelete(NULL);
 }
 
 void ping_task()
 {
 	while (1)
 	{
-		for (uint8_t arm = 10; arm <= 80; arm += 10)
+		for (uint8_t arm = ARM_3_BASE; arm <= ARM_3_BASE; arm += 10)
 		{
-			for (uint8_t motor = 1; motor <= 6; ++motor)
+			for (uint8_t motor = MOTOR_A; motor <= MOTOR_F; ++motor)
 			{
 				ax_packet_t packet;
-				//packet.id = arm + motor;
-				packet.id = 61;
+				packet.id = arm + motor;
 				packet.type = AX_PING;
 				packet.params_length = 0;
 
@@ -383,82 +453,94 @@ uint8_t idToIndex(uint8_t id)
 {
 	uint8_t motor = id % 10;
 	uint8_t arm = (id - motor) / 10;
-	return (arm - 1) * 6 + (motor - 1);
+	return arm * 6 + (motor - 1);
 }
 
 uint8_t indexToId(uint8_t index)
 {
 	uint8_t motor = (index % 6) + 1;
-	uint8_t arm = (index / 6) + 1;
-	return (arm * 10 + motor);
+	uint8_t arm = (index / 6) * 10;
+	return arm + motor;
 }
 
-void rotate(uint8_t arm, uint16_t aDegrees)
+void rotate(arm_t arm, uint16_t aDegrees)
 {
-	uint8_t index = (arm - 1) * 6;
-	uint8_t aMotor = arm * 10 + 1;
-	setSpeed(aMotor, 15);
-	setGoalPosition(aMotor, aDegrees);
-	goalPositions[index].x = aDegrees / 0.29;
+	uint8_t aMotorId = arm * 10 + MOTOR_A;
+	setSpeed(aMotorId, RPM);
+	setGoalPosition(aMotorId, aDegrees);
 }
 
-void stretch(uint8_t arm, uint16_t bDegrees, uint16_t cDegrees, uint16_t dDegrees)
+void stretch(arm_t arm, uint16_t bDegrees, uint16_t cDegrees, uint16_t dDegrees)
 {
-	uint8_t index = (arm - 1) * 6;
-	uint8_t bMotor = arm * 10 + 2;
-	uint8_t cMotor = bMotor + 1;
-	uint8_t dMotor = cMotor + 1;
-	uint16_t bDegreesDelta = abs(presentPositions[index + 1].x - bDegrees);
-	uint16_t cDegreesDelta = abs(presentPositions[index + 2].x - cDegrees);
-	uint16_t dDegreesDelta = abs(presentPositions[index + 3].x - dDegrees);
-	uint16_t bRpm = (bDegreesDelta / 90.0) * 15;
-	uint16_t cRpm = (cDegreesDelta / 90.0) * 15;
-	uint16_t dRpm = (dDegreesDelta / 90.0) * 15;
-	setSpeed(bMotor, bRpm);
-	setSpeed(cMotor, cRpm);
-	setSpeed(dMotor, dRpm);
-	setGoalPosition(bMotor, bDegrees);
-	setGoalPosition(cMotor, cDegrees);
-	setGoalPosition(dMotor, dDegrees);
-	goalPositions[index+1].x = bDegrees / 0.29;
-	goalPositions[index+2].x = cDegrees / 0.29;
-	goalPositions[index+3].x = dDegrees / 0.29;
+	volatile uint8_t index = arm * 6;
+	volatile uint8_t bMotorId = arm * 10 + MOTOR_B;
+	volatile uint8_t cMotorId = bMotorId + 1;
+	volatile uint8_t dMotorId = cMotorId + 1;
+	volatile uint16_t bDegreesDelta = abs(presentPositions[index + 1].x - DEGREES_TO_UNITS(bDegrees));
+	volatile uint16_t cDegreesDelta = abs(presentPositions[index + 2].x - DEGREES_TO_UNITS(cDegrees));
+	volatile uint16_t dDegreesDelta = abs(presentPositions[index + 3].x - DEGREES_TO_UNITS(dDegrees));
+	volatile uint16_t bRpm = (bDegreesDelta / 90.0) * RPM;
+	volatile uint16_t cRpm = (cDegreesDelta / 90.0) * RPM;
+	volatile uint16_t dRpm = (dDegreesDelta / 90.0) * RPM;
+	setSpeed(bMotorId, bRpm);
+	setSpeed(cMotorId, cRpm);
+	setSpeed(dMotorId, dRpm);
+	setGoalPosition(bMotorId, bDegrees);
+	setGoalPosition(cMotorId, cDegrees);
+	setGoalPosition(dMotorId, dDegrees);
 }
 
-void wrist(uint8_t arm, uint16_t dDegrees)
+void wrist(arm_t arm, uint16_t dDegrees)
 {
-	uint8_t index = (arm - 1) * 6;
-	uint8_t aMotor = arm * 10 + 4;
-	setSpeed(aMotor, 15);
-	setGoalPosition(aMotor, dDegrees);
-	goalPositions[index+3].x = dDegrees / 0.29;
+	uint8_t dMotorId = arm * 10 + MOTOR_D;
+	setSpeed(dMotorId, RPM);
+	setGoalPosition(dMotorId, dDegrees);
 }
 
 void claw(uint8_t arm, uint16_t eDegrees, uint16_t fDegrees)
 {
-	uint8_t index = (arm - 1) * 6;
-	uint8_t eMotor = arm * 10 + 5;
-	uint8_t fMotor = arm * 10 + 6;
-	setSpeed(eMotor, 15);
-	setSpeed(fMotor, 15);
-	setGoalPosition(eMotor, eDegrees);
-	setGoalPosition(fMotor, fDegrees);
-	goalPositions[index+4].x = eDegrees / 0.29;
-	goalPositions[index+5].x = fDegrees / 0.29;
+	uint8_t eMotorId = arm * 10 + MOTOR_E;
+	uint8_t fMotorId = arm * 10 + MOTOR_F;
+	setSpeed(eMotorId, RPM);
+	setSpeed(fMotorId, RPM);
+	setGoalPosition(eMotorId, eDegrees);
+	setGoalPosition(fMotorId, fDegrees);
 }
 
 //0--1023, 0.111 rpm per unit
-void setSpeed(uint8_t motor, uint16_t rpm)
+void setSpeed(uint8_t motorId, uint16_t rpm)
 {
-	uint16_t units = rpm / 0.111;
-	units = units > 1023 ? 1023 : units;
-	//TODO: send instruction packet.
+	uint16_t units = rpm / RPM_UNIT;
+	ax_packet_t packet;
+	packet.id = motorId;
+	packet.type = AX_WRITE;
+	packet.params[0] = AX_MOVING_SPEED;
+	packet.params[1] = units & 0xFF;
+	packet.params[2] = (units >> 8) & 0xFF;
+	packet.params_length = 3;
+	xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
+	if (!inProgress)
+	{
+		_CR1_TXEIE_SET;
+	}
 }
 
 //0--1023, 0.29 degree per unit
-void setGoalPosition(uint8_t motor, uint16_t degrees)
+void setGoalPosition(uint8_t motorId, uint16_t degrees)
 {
-	uint16_t units = degrees / 0.29;
-	units = units > 1023 ? 1023 : units;
-	//TODO: send instruction packet.
+	uint16_t units = degrees / DEGREES_UNIT;
+	uint8_t index = idToIndex(motorId);
+	goalPositions[index].x = units;
+	ax_packet_t packet;
+	packet.id = motorId;
+	packet.type = AX_WRITE;
+	packet.params[0] = AX_GOAL_POSITION;
+	packet.params[1] = units & 0xFF;
+	packet.params[2] = (units >> 8) & 0xFF;
+	packet.params_length = 3;
+	xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
+	if (!inProgress)
+	{
+		_CR1_TXEIE_SET;
+	}
 }

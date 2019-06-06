@@ -3,6 +3,12 @@
 
 #include <stdint.h>
 
+#define DEGREES_UNIT		(0.29)
+#define RPM_UNIT			(0.111)
+#define DEGREES_TO_UNITS(x)	((uint16_t)(x / DEGREES_UNIT))
+#define RPM_TO_UNITS(x)		((uint16_t)(x / RPM_UNIT))
+#define RPM					(15)
+
 typedef enum
 {
 	AX_PING = 1,
