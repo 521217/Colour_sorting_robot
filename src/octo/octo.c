@@ -53,6 +53,7 @@ void USART1_IRQ_handler(void)
 		switch (packet.type)
 		{
 			case AX_PING:
+			case AX_WRITE:
 				rxbytes = 6;
 				break;
 			case AX_READ:
@@ -67,7 +68,7 @@ void USART1_IRQ_handler(void)
 
 		txn = 0;
 		rxn = 0;
-		index = idToIndex(packet.id);
+		index = idToIndex(packet.id); //index not used when broadcast id.
 		inProgress = 1;
 	}
 
@@ -193,7 +194,7 @@ void init_task()
 
 	//Start user, arm, ping, position, rgb tasks.
 	//xTaskCreate(user_task, "user", 128, NULL, 10, NULL);
-	xTaskCreate(arm_task, "arm", 128, NULL, 9, NULL);
+	//xTaskCreate(arm_task, "arm", 128, NULL, 9, NULL);
 	//xTaskCreate(ping_task, "ping", 128, NULL, 8, NULL);
 	//xTaskCreate(position_task, "position", 128, NULL, 7, NULL);
 	//xTaskCreate(rgb_task, "rgb", 128, NULL, 6, NULL);
@@ -204,56 +205,105 @@ void init_task()
 	NVIC_SetPriorityGrouping(__NVIC_PRIO_BITS); //https://www.freertos.org/RTOS-Cortex-M3-M4.html
 	NVIC_SetPriority(37, 0);
 	NVIC_ClearPendingIRQ(37);
-	//NVIC_EnableIRQ(37);
+	NVIC_EnableIRQ(37);
 
 	//Prepare arms.
 	ax_packet_t packet;
-	packet.id = BROADCAST_ID;
 	packet.type = AX_WRITE;
-	//EEPROM:
-	//RETURN DELAY TIME 1
-	packet.params[0] = AX_RETURN_DELAY_TIME;
-	packet.params[1] = 50;
-	packet.params_length = 2;
-	xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
-	//CW ANGLE LIMIT 2
-	packet.params[0] = AX_CW_ANGLE_LIMIT;
-	packet.params[1] = DEGREES_TO_UNITS(60) & 0xFF;
-	packet.params[2] = (DEGREES_TO_UNITS(60) >> 8) & 0xFF;
-	packet.params_length = 3;
-	xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
-	//CCW ANGLE LIMIT 2
-	packet.params[0] = AX_CCW_ANGLE_LIMIT;
-	packet.params[1] = DEGREES_TO_UNITS(240) & 0xFF;
-	packet.params[2] = (DEGREES_TO_UNITS(240) >> 8) & 0xFF;
-	packet.params_length = 3;
-	xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
-	//MAX TORQUE 2
-	packet.params[0] = AX_MAX_TORQUE;
-	packet.params[1] = 0xFF;
-	packet.params[2] = 0x03;
-	packet.params_length = 3;
-	xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
-	//STATUS RETURN LEVEL 2
-	packet.params[0] = AX_STATUS_RETURN_LEVEL;
-	packet.params[1] = 0x02; //Return status packet for all instruction packets.
-	packet.params_length = 2;
-	xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
-	//RAM:
-	//MOVING SPEED 2
-	packet.params[0] = AX_MOVING_SPEED;
-	packet.params[1] = RPM_TO_UNITS(RPM) & 0xFF;
-	packet.params[2] = (RPM_TO_UNITS(RPM) >> 8) & 0xFF;
-	packet.params_length = 3;
-	xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
-	//TORQUE ENABLE 1
-	packet.params[0] = AX_TORQUE_ENABLE;
-	packet.params[1] = 0x01;
-	packet.params_length = 2;
-	xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
+	for (int arm = ARM_4_BASE; arm <= ARM_4_BASE; arm += 10)
+	{
+		for (int motor = MOTOR_A; motor <= MOTOR_F; ++motor)
+		{
+			packet.id = arm + motor;
+
+			//RAM
+			//TORQUE ENABLE 1
+			packet.params[0] = AX_TORQUE_ENABLE;
+			packet.params[1] = 0;
+			packet.params_length = 2;
+			xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
+			//EEPROM:
+			//RETURN DELAY TIME 1
+			packet.params[0] = AX_RETURN_DELAY_TIME;
+			packet.params[1] = 50;
+			packet.params_length = 2;
+			xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
+			//CW ANGLE LIMIT 2
+			packet.params[0] = AX_CW_ANGLE_LIMIT;
+			packet.params[1] = DEGREES_TO_UNITS(60) & 0xFF;
+			packet.params[2] = (DEGREES_TO_UNITS(60) >> 8) & 0xFF;
+			packet.params_length = 3;
+			xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
+			//CCW ANGLE LIMIT 2
+			packet.params[0] = AX_CCW_ANGLE_LIMIT;
+			packet.params[1] = DEGREES_TO_UNITS(240) & 0xFF;
+			packet.params[2] = (DEGREES_TO_UNITS(240) >> 8) & 0xFF;
+			packet.params_length = 3;
+			xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
+			//MAX TORQUE 2
+			packet.params[0] = AX_MAX_TORQUE;
+			packet.params[1] = 0xFF;
+			packet.params[2] = 0x03;
+			packet.params_length = 3;
+			xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
+			//STATUS RETURN LEVEL 2
+			packet.params[0] = AX_STATUS_RETURN_LEVEL;
+			packet.params[1] = 0x02; //Return status packet for all instruction packets.
+			packet.params_length = 2;
+			xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
+			//RAM:
+			//MOVING SPEED 2
+			packet.params[0] = AX_MOVING_SPEED;
+			packet.params[1] = RPM_TO_UNITS(RPM) & 0xFF;
+			packet.params[2] = (RPM_TO_UNITS(RPM) >> 8) & 0xFF;
+			packet.params_length = 3;
+			xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
+			//GOAL POSITION 2
+			uint16_t goalPosition;
+			switch (motor)
+			{
+				case MOTOR_A:
+					goalPosition = DEGREES_TO_UNITS(150);
+					break;
+				case MOTOR_B:
+					goalPosition = DEGREES_TO_UNITS(195);
+					break;
+				case MOTOR_C:
+					goalPosition = DEGREES_TO_UNITS(60);
+					break;
+				case MOTOR_D:
+					goalPosition = DEGREES_TO_UNITS(60);
+					break;
+				case MOTOR_E:
+					goalPosition = DEGREES_TO_UNITS(150);
+					break;
+				case MOTOR_F:
+					goalPosition = DEGREES_TO_UNITS(150);
+				default:
+					goalPosition = DEGREES_TO_UNITS(150);
+					break;
+			}
+			packet.params[0] = AX_GOAL_POSITION;
+			packet.params[1] = LOW(goalPosition);
+			packet.params[2] = HIGH(goalPosition);
+			packet.params_length = 2;
+			xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
+			//TORQUE ENABLE 1
+			packet.params[0] = AX_TORQUE_ENABLE;
+			packet.params[1] = 1;
+			packet.params_length = 2;
+			xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
+
+			if (!inProgress)
+			{
+				_CR1_TXEIE_SET;
+			}
+		}
+	}
+
 
 	//First round of present position readings.
-	for (int arm = ARM_3_BASE; arm <= ARM_3_BASE; arm += 10)
+	for (int arm = ARM_4_BASE; arm <= ARM_4_BASE; arm += 10)
 	{
 		for (int motor = MOTOR_A; motor <= MOTOR_F; ++motor)
 		{
