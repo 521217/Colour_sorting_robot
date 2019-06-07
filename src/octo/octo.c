@@ -16,11 +16,13 @@ uint8_t dummy;
 uint8_t inProgress;
 
 QueueHandle_t uartPacketQueue;
+QueueHandle_t usartPacketQueue;
 QueueHandle_t uartSignalQueue;
-QueueHandle_t uartResultQueue;
 
 void USART1_IRQ_handler(void)
 {
+	static uint8_t signal = 0x55;
+
 	static ax_packet_t packet;
 	volatile static uint8_t tx[16];
 	volatile static uint8_t rx[16];
@@ -30,13 +32,20 @@ void USART1_IRQ_handler(void)
 	volatile static uint8_t rxbytes = 0;
 	volatile static uint8_t index = 0;
 
+	volatile uint32_t sr = _USART_SR;
+	volatile uint32_t dr = _USART_DR;
+	volatile uint32_t cr1 = _USART_CR1;
+	volatile uint8_t txe = (sr >> 7) & 1;
+	volatile uint8_t tc = (sr >> 6) & 1;
+	volatile uint8_t rxne = (sr >> 5) & 1;
+	volatile uint8_t txeie = (cr1 >> 7) & 1;
+	volatile uint8_t tcie = (cr1 >> 6) & 1;
+	volatile uint8_t rxneie = (cr1 >> 5) & 1;
+	volatile uint8_t data = (uint8_t)dr;
+
 	if (!inProgress)
 	{
-		if (xQueueReceiveFromISR(uartPacketQueue, &packet, NULL) == pdFALSE)
-		{
-			_CR1_TXEIE_CLEAR;
-			return;
-		}
+		BaseType_t result = xQueueReceiveFromISR(usartPacketQueue, &packet, NULL);
 
 		tx[0] = 0xFF;
 		tx[1] = 0xFF;
@@ -72,31 +81,6 @@ void USART1_IRQ_handler(void)
 		inProgress = 1;
 	}
 
-	volatile uint32_t sr = _USART_SR;
-	volatile uint32_t dr = _USART_DR;
-	volatile uint32_t cr1 = _USART_CR1;
-	volatile uint8_t txe = (sr >> 7) & 1;
-	volatile uint8_t tc = (sr >> 6) & 1;
-	volatile uint8_t rxne = (sr >> 5) & 1;
-	volatile uint8_t txeie = (cr1 >> 7) & 1;
-	volatile uint8_t tcie = (cr1 >> 6) & 1;
-	volatile uint8_t rxneie = (cr1 >> 5) & 1;
-	volatile uint8_t data = (uint8_t)dr;
-
-	if (tcie && tc)
-	{
-		_CR1_TCIE_CLEAR;
-		if (rxbytes)
-		{
-			_CR1_RXNEIE_SET;
-		}
-		else
-		{
-			inProgress = 0;
-		}
-		_GPIOB_BSRR |= (1 << 16);
-	}
-
 	if (txeie && txe)
 	{
 		if (txn < txbytes)
@@ -109,6 +93,21 @@ void USART1_IRQ_handler(void)
 		{
 			_CR1_TXEIE_CLEAR;
 			_CR1_TCIE_SET;
+		}
+	}
+
+	if (tcie && tc)
+	{
+		_CR1_TCIE_CLEAR;
+		_GPIOB_BSRR |= (1 << 16);
+		if (rxbytes)
+		{
+			_CR1_RXNEIE_SET;
+		}
+		else
+		{
+			xQueueSendFromISR(uartSignalQueue, &signal, NULL);
+			inProgress = 0;
 		}
 	}
 
@@ -137,15 +136,8 @@ void USART1_IRQ_handler(void)
 			}
 
 			_CR1_RXNEIE_CLEAR;
+			xQueueSendFromISR(uartSignalQueue, &signal, NULL);
 			inProgress = 0;
-		}
-	}
-
-	if (!inProgress)
-	{
-		if (uxQueueMessagesWaitingFromISR(uartPacketQueue))
-		{
-			_CR1_TXEIE_SET;
 		}
 	}
 }
@@ -186,13 +178,14 @@ void init_task()
 
 	//Create queues.
 	uartPacketQueue = xQueueCreate(64, sizeof(ax_packet_t));
-	uartSignalQueue = xQueueCreate(64, sizeof(uint8_t));
-	uartResultQueue = xQueueCreate(64, sizeof(uint8_t));
+	usartPacketQueue = xQueueCreate(1, sizeof(ax_packet_t));
+	uartSignalQueue = xQueueCreate(1, sizeof(uint8_t));
 
 	//Start uart and i2c tasks.
 	//xTaskCreate(i2c_task, "i2c", 128, NULL, 11, NULL);
 
 	//Start user, arm, ping, position, rgb tasks.
+	xTaskCreate(uart_task, "uart", 128, NULL, 11, NULL);
 	//xTaskCreate(user_task, "user", 128, NULL, 10, NULL);
 	//xTaskCreate(arm_task, "arm", 128, NULL, 9, NULL);
 	//xTaskCreate(ping_task, "ping", 128, NULL, 8, NULL);
@@ -212,7 +205,7 @@ void init_task()
 	packet.type = AX_WRITE;
 	for (int arm = ARM_4_BASE; arm <= ARM_4_BASE; arm += 10)
 	{
-		for (int motor = MOTOR_A; motor <= MOTOR_F; ++motor)
+		for (int motor = MOTOR_B; motor <= MOTOR_F; ++motor)
 		{
 			packet.id = arm + motor;
 
@@ -246,7 +239,7 @@ void init_task()
 			packet.params[2] = 0x03;
 			packet.params_length = 3;
 			xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
-			//STATUS RETURN LEVEL 2
+			//STATUS RETURN LEVEL 1
 			packet.params[0] = AX_STATUS_RETURN_LEVEL;
 			packet.params[1] = 0x02; //Return status packet for all instruction packets.
 			packet.params_length = 2;
@@ -286,26 +279,20 @@ void init_task()
 			packet.params[0] = AX_GOAL_POSITION;
 			packet.params[1] = LOW(goalPosition);
 			packet.params[2] = HIGH(goalPosition);
-			packet.params_length = 2;
+			packet.params_length = 3;
 			xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
 			//TORQUE ENABLE 1
 			packet.params[0] = AX_TORQUE_ENABLE;
 			packet.params[1] = 1;
 			packet.params_length = 2;
 			xQueueSend(uartPacketQueue, &packet, portMAX_DELAY);
-
-			if (!inProgress)
-			{
-				_CR1_TXEIE_SET;
-			}
 		}
 	}
-
 
 	//First round of present position readings.
 	for (int arm = ARM_4_BASE; arm <= ARM_4_BASE; arm += 10)
 	{
-		for (int motor = MOTOR_A; motor <= MOTOR_F; ++motor)
+		for (int motor = MOTOR_B; motor <= MOTOR_F; ++motor)
 		{
 			packet.id = arm + motor;
 			packet.type = AX_READ;
@@ -316,13 +303,27 @@ void init_task()
 		}
 	}
 
-	if (!inProgress)
-	{
-		_CR1_TXEIE_SET;
-	}
-
 	//Init task suicide.
 	vTaskDelete(NULL);
+}
+
+//The is the only task that is allowed to put packets in the USART1 IRQ packet queue and setting the interrupt.
+//This task must wait on a signal from the USART1 IRQ to prevent setting interrupts on the wrong times.
+void uart_task()
+{
+	ax_packet_t packet;
+	uint8_t dummy;
+
+	while (1)
+	{
+		xQueueReceive(uartPacketQueue, &packet, portMAX_DELAY);
+		xQueueSend(usartPacketQueue, &packet, portMAX_DELAY);
+		if (!inProgress)
+		{
+			_CR1_TXEIE_SET;
+		}
+		xQueueReceive(uartSignalQueue, &dummy, portMAX_DELAY);
+	}
 }
 
 void i2c_task()
