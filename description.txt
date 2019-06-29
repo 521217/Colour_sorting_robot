@@ -1,0 +1,54 @@
+Gebruiker en systeem.
+
+Het systeem is voorzien van 3.3V, 5V en 11.1V of 12V.
+De servomotoren van de armen staan allemaal in joint mode en in een zo min mogelijk chaotische opstelling.
+Het systaam staat aan.
+Bij het aanzetten van het systeem gaan de armen naar ruststand.
+Het systeem verwacht van de gebruiker dat er op een knop wordt gedrukt.
+Het eerste keer indrukken van de knop scant de placeholders voor ballen, het systeem onthoud deze plekken.
+Deze plekken zijn de eindposities, de plekken waar de ballen uiteindelijk naar toe worden gebracht.
+Als het onthouden klaar is wordt een LED van staat veranderd en mag de gebruiker nogmaals op de knop drukken.
+De gebruiker heeft de keuze om de ballen op een andere plek te leggen voordat er op de knop gedrukt wordt.
+Nadat de knop voor dei tweede keer is ingedrukt heeft de gebruiker alleen nog interactie met het systeem via de noodstop.
+
+Opstarten van systeem.
+
+Het systeem is voorzien van 3.3V, 5V en 11.1V of 12V.
+Bij het opstarten van de STM32 worden i2c en uart module ingesteld en opgestart.
+Het allereerste is het systeem controleren of de 48 servomotoren en 12 RGB sensoren aanwezig zijn.
+Dit moet gedaan worden over i2c en uart.
+Voor het uart gedeelte moeten interrupts aan staan.
+Dit vanwege dat een struct in een queue wordt gezet waarna de TXEIE interrupt vlag hoog wordt gezet.
+Dit veroorzaakt een interrupt en de uart interrupt handler wordt aangeroepen.
+De uart interrupt handler leest van de queue en transformeert de struct naar een buffer van bytes.
+De rest van de code in de uart interrupt handler zorgt ervoor dat de bytes goed op de bus worden gezet en dat sommige ontvangen bytes juist wegschreven worden.
+Dit gaat een beetje in tegen het zo klein mogelijk houden van een interrupt handler.
+Een andere oplossingen is dat een taak zelf een struct van de queue leest en dit ontleed naar bytes.
+De taak zal dan zelf bytes op de bus moeten zetten en wachten op een signaal van de interrupt handler zodat het de volgende bytes op de bus kan zetten.
+Na het versturen van alle bytes moet de taak wachten op de status packet van een motor of het hoeft op geen status packet te wachten in sommige gevallen.
+Bij het ontvangen van een byte wordt de RXNE vlag hoog gezet.
+De uart interrupt handler wordt aangeroepen en zal een signaal geven aan de taak.
+De taak kan zelf de data uit de data register halen maar het kan zo zijn dat dit niet optijd gebeurd.
+De interrupt handler kan ook de data in een andere queue stoppen waarop de taak blockt.
+Als de taak niet optijd is, raakt de data niet verloren.
+De deadline van deze taak is flexibel.
+Het gaat hier wel om de uart bus en op de uart bus vindt alleen communicatie plaats tussen de microcontroller en servomotoren.
+Dit speelt een rol in het bepalen van prioriteit van de taak.
+Nadat de controle op de 48 servomotoren en 12 RGB sensoren heeft plaats gevonden kunnen de armen in ruststand gezet worden.
+Het systeem wacht op de gebruiker voor het eerste keer indrukken van de knop.
+Gebruiker heeft knop ingedrukt en het systeem leest de eindposities van de ballen.
+Het lezen gebeurd met de RGB sensoren en over i2c.
+Geen taken hoeven hier parallel aan te lopen.
+De RGB sensoren zijn gelezen en de posities onthouden, een LED wordt van staat veranderd.
+Als er nul ballen geplaats zijn stopt het systeem.
+Het systeem verwacht nog een keer van de gebruiker dat het de knop indrukt.
+Bij het tweede keer indrukken van de knop worden de RGB sensoren nog een keer gelezen.
+Als er geen ballen zijn die overeenkomen van de eerder gescande ballen dan stopt het systeem.
+Anders worden instructies gegenereerd op basis van de overeenkomende ballen van de beginposities naar eindposities.
+Instructie is misschien een foute benaming want het bevat de arm die bestuurd moet worden, de placeholders die benut raken en de graden waarmee de arm moet draaien.
+Een instructie is eigenlijk een edge van een graaf.
+Het geeft de van en naar placeholders aan, de placeholders die benut raken.
+De instructies worden een queue geplaatst.
+Vanaf dit punt gaan de armen bewegen om de ballen naar hun eindpositie te brengen.
+Hierbij hoeven de RGB sensoren niet gelezen te worden.
+Het gaat alleen om de communicatie over de uart lijn.
